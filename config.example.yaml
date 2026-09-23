@@ -1,0 +1,66 @@
+# Copy to config.yaml and edit. Secrets (password, webhook) belong in .env, not here.
+data_dir: data
+starting_equity: 100000        # SMG starting balance, used for % return
+live_trading_enabled: false    # second safety key for --live (or SMG_LIVE_TRADING=1)
+schedule_time: "10:00"         # daily run, America/New_York
+leaderboard_day: fri
+leaderboard_time: "16:30"
+market_data: yfinance          # or "csv" with market_data_dir of <TICKER>.csv files
+market_data_dir: data/prices
+
+smg:
+  login_url: https://www.stockmarketgame.org/login.html
+  # Leave page URLs blank to navigate by link text ("Account Holdings", "Enter a Trade",
+  # "Rankings", ...). Fill them in once you know the real URLs (see `inspect`).
+  portfolio_url: ""
+  account_summary_url: ""
+  trade_url: ""
+  pending_orders_url: ""
+  rankings_url: ""
+  team_name: "Your Team Name"   # exactly as on the rankings page, for rank-change alerts
+  region_filter: North Carolina
+  headless: true
+  min_seconds_between_requests: 2
+  # Selector overrides (tried before the built-in defaults). Prefixes: css:, xpath:, link:, id:, name:
+  selectors: {}
+  #  holdings_table: "css:table#ctl00_MainContent_gvHoldings"
+  #  trade_symbol: "css:#ctl00_MainContent_txtSymbol"
+  #  option_text:
+  #    security_type: ["Stocks"]
+  #    BUY: ["Buy"]
+  #    SELL: ["Sell"]
+
+rules:
+  allowed_exchanges: [NYSE, NASDAQ]
+  min_share_price: 3.00
+  min_shares_per_trade: 10
+  commission_rate: 0.005        # check your SMG session's broker fee
+  use_margin: false
+  margin_limit: 50000
+  margin_weekly_interest_rate: 0.07
+  enforce_market_hours: true
+  allow_short_selling: false
+  max_position_pct: 0.20        # bot risk limit per ticker
+  max_trades_per_run: 5
+  min_seconds_between_trades: 5
+  cash_reserve: 1000
+
+strategy:
+  universe: [AAPL, MSFT, NVDA, AMZN, GOOGL, META, JPM, V, JNJ, XOM, WMT, PG, KO, COST, AMD, NFLX]
+  weights:                       # any registered strategy name; 0 disables
+    momentum: 0.5
+    technical: 0.3
+    fundamentals: 0.2
+  buy_threshold: 0.35
+  sell_threshold: 0.35
+  min_confidence_to_trade: 0.4
+  momentum_min_signals: 3        # N sources must agree
+  benchmark: SPY
+  params:
+    technical: {rsi_oversold: 30, rsi_overbought: 70, ma_window: 50}
+    fundamentals: {fair_pe: 25, expensive_pe: 40}
+
+alerts:
+  high_confidence_threshold: 0.8
+  drawdown_threshold: 0.10
+  email_to: ""
