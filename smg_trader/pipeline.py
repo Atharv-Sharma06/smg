@@ -18,9 +18,10 @@ from .market_data import MarketDataProvider, make_provider
 from .market_hours import market_status, now_et
 from .models import Action, Portfolio, Signal, TradeStatus
 from .monitor import LeaderboardMonitor, PerformanceTracker, alert_high_confidence
+from .pit import PointInTimeProvider, PointInTimeStore, record_snapshot
+from .planner import plan_orders
 from .rules import RuleValidator
 from .scraper import SMGScraper
-from .sizing import build_orders
 from .strategies import Strategy, StrategyContext, build_strategy
 
 log = logging.getLogger(__name__)
@@ -61,12 +62,14 @@ class Pipeline:
         self.performance = PerformanceTracker(data / "portfolio_history.csv", cfg.starting_equity,
                                               self.alerts, cfg.alerts.drawdown_threshold)
         self.leaderboard = LeaderboardMonitor(data / "leaderboard.json", cfg.smg.team_name, self.alerts)
+        self.pit_store = PointInTimeStore(data / "pit")
         self._exchanges: dict[str, str | None] = {}
 
     @property
     def provider(self) -> MarketDataProvider:
         if self._provider is None:
-            self._provider = make_provider(self.cfg.market_data, self.cfg.market_data_dir)
+            base = make_provider(self.cfg.market_data, self.cfg.market_data_dir)
+            self._provider = PointInTimeProvider(base, self.pit_store)
         return self._provider
 
     def exchange_of(self, ticker: str) -> str | None:
@@ -82,14 +85,20 @@ class Pipeline:
         log.info("No %s; using an empty portfolio with $%s cash", file, f"{self.cfg.starting_equity:,.0f}")
         return Portfolio(cash=self.cfg.starting_equity, total_equity=self.cfg.starting_equity)
 
-    def generate_signals(self, portfolio: Portfolio, strategy_name: str | None = None) -> list[Signal]:
+    def make_context(self) -> StrategyContext:
+        return StrategyContext(self.provider, as_of=self.clock().date(),
+                               lookback_days=self.cfg.strategy.lookback_days,
+                               benchmark=self.cfg.strategy.benchmark, live=True)
+
+    def universe(self, portfolio: Portfolio) -> list[str]:
+        return list(dict.fromkeys([t.upper() for t in self.cfg.strategy.universe]
+                                  + [h.ticker for h in portfolio.holdings]))
+
+    def generate_signals(self, portfolio: Portfolio, strategy_name: str | None = None,
+                         ctx: StrategyContext | None = None) -> list[Signal]:
         strategy: Strategy = build_strategy(self.cfg.strategy, only=strategy_name)
-        universe = list(dict.fromkeys([t.upper() for t in self.cfg.strategy.universe]
-                                      + [h.ticker for h in portfolio.holdings]))
-        ctx = StrategyContext(self.provider, as_of=self.clock().date(),
-                              lookback_days=self.cfg.strategy.lookback_days,
-                              benchmark=self.cfg.strategy.benchmark, live=True)
-        signals = strategy.generate_all(universe, ctx)
+        ctx = ctx or self.make_context()
+        signals = strategy.generate_all(self.universe(portfolio), ctx)
         for s in signals:
             if s.action != Action.HOLD:
                 s.price = self.provider.latest_price(s.ticker) or s.price
@@ -140,7 +149,11 @@ class Pipeline:
                 portfolio = scraper.get_portfolio()
             perf = self.performance.record(portfolio)
 
-            signals = self.generate_signals(portfolio, opts.strategy)
+            ctx = self.make_context()
+            signals = self.generate_signals(portfolio, opts.strategy, ctx)
+            if self.cfg.record_point_in_time:
+                n = record_snapshot(self.pit_store, self.provider, self.universe(portfolio), ctx.as_of)
+                log.debug("recorded %d point-in-time rows", n)
             for s in signals:
                 if s.action != Action.HOLD:
                     log.info("SIGNAL %-4s %-5s conf %.2f @ $%.2f  %s", s.action.value, s.ticker,
@@ -149,8 +162,11 @@ class Pipeline:
                      sum(s.action != Action.HOLD for s in signals), len(signals))
             alert_high_confidence(signals, self.alerts, self.cfg.alerts.high_confidence_threshold)
 
-            orders = build_orders(signals, portfolio, self.cfg.rules,
-                                  min_confidence=self.cfg.strategy.min_confidence_to_trade)
+            plan = plan_orders(signals, portfolio, ctx, rules=self.cfg.rules, portfolio_cfg=self.cfg.portfolio,
+                               pairs_cfg=self.cfg.pairs, min_confidence=self.cfg.strategy.min_confidence_to_trade)
+            if plan.pair_signals:
+                self._save_signals(plan.pair_signals)
+            orders = plan.orders
             validator = RuleValidator(self.cfg.rules, self.exchange_of, lock=self.lock, clock=self.clock)
             executor = TradeExecutor(validator, self.trade_log, self.alerts, broker=scraper,
                                      dry_run=not opts.live, check_hours=not opts.ignore_hours)
@@ -172,9 +188,12 @@ class Pipeline:
                 "portfolio": portfolio.to_dict(),
                 "performance": perf.__dict__,
                 "signals": [s.to_dict() for s in signals],
+                "pair_signals": [s.to_dict() for s in plan.pair_signals],
+                "target_weights": plan.target_weights,
                 "orders": [
                     {"ticker": r.order.ticker, "action": r.order.action.value, "shares": r.order.shares,
-                     "price": r.order.price, "status": r.status.value, "message": r.message}
+                     "price": r.order.price, "status": r.status.value, "message": r.message,
+                     "group": r.order.group_id}
                     for r in results
                 ],
                 "portfolio_after": after.to_dict(),

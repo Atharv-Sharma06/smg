@@ -23,7 +23,7 @@ from typing import Any, Callable
 
 import pandas as pd
 
-from ..market_data import MarketDataProvider
+from ..market_data import AnalystActions, Fundamentals, MarketDataProvider
 from ..models import Action, Signal
 
 log = logging.getLogger(__name__)
@@ -59,8 +59,10 @@ class StrategyContext:
     """What a strategy is allowed to see.
 
     ``as_of`` caps every price lookup, so the backtester can replay history
-    without look-ahead. ``live`` is False in backtests: sources that only have
-    current data (news, analyst ratings, fundamentals) must then abstain.
+    without look-ahead. Fundamentals, analyst actions and news go through the
+    methods below: live runs get current data, backtests (``live=False``) get
+    point-in-time data from the provider, or ``None`` when nothing is known
+    for that date (the strategy should then abstain).
     """
 
     provider: MarketDataProvider
@@ -84,6 +86,29 @@ class StrategyContext:
     def last_price(self, ticker: str) -> float | None:
         closes = self.closes(ticker)
         return float(closes.iloc[-1]) if not closes.empty else None
+
+    def fundamentals(self, ticker: str) -> Fundamentals | None:
+        if self.live:
+            return self.provider.fundamentals(ticker)
+        return self.provider.fundamentals_at(ticker, self.as_of)
+
+    def sector(self, ticker: str) -> str | None:
+        """Sector is treated as static, so today's value is used in backtests too."""
+        f = self.provider.fundamentals(ticker)
+        if f is None and not self.live:
+            f = self.provider.fundamentals_at(ticker, self.as_of)
+        return f.sector if f else None
+
+    def analyst_actions(self, ticker: str, days: int = 30) -> AnalystActions | None:
+        start = self.as_of - timedelta(days=days)
+        if self.live:
+            return self.provider.analyst_actions(ticker, start)
+        return self.provider.analyst_actions_at(ticker, start, self.as_of)
+
+    def news(self, ticker: str, days: int = 7) -> list[str] | None:
+        if self.live:
+            return self.provider.news_headlines(ticker)
+        return self.provider.news_at(ticker, self.as_of - timedelta(days=days), self.as_of)
 
 
 def clamp(x: float, lo: float = -1.0, hi: float = 1.0) -> float:

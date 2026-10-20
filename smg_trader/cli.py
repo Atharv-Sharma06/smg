@@ -8,6 +8,7 @@ import logging
 import sys
 from datetime import date, timedelta
 
+from .allocation import METHODS
 from .config import AppConfig, load_config
 
 log = logging.getLogger("smg_trader")
@@ -132,24 +133,76 @@ def cmd_trade(cfg: AppConfig, args: argparse.Namespace) -> int:
 def cmd_backtest(cfg: AppConfig, args: argparse.Namespace) -> int:
     from .backtest import Backtester
     from .market_data import CSVProvider, make_provider
+    from .pit import PointInTimeProvider, PointInTimeStore
     from .strategies import build_strategy
 
     end = date.fromisoformat(args.end) if args.end else date.today() - timedelta(days=1)
     start = date.fromisoformat(args.start) if args.start else end - timedelta(days=int(args.months * 30.4))
-    provider = CSVProvider(args.data_dir) if args.data_dir else make_provider(cfg.market_data, cfg.market_data_dir)
+    base = CSVProvider(args.data_dir) if args.data_dir else make_provider(cfg.market_data, cfg.market_data_dir)
+    provider = PointInTimeProvider(base, PointInTimeStore(cfg.data_path / "pit"))
     tickers = [t.strip().upper() for t in args.tickers.split(",")] if args.tickers else cfg.strategy.universe
+    _apply_overrides(cfg, args)
+    if cfg.pairs.enabled and not cfg.rules.allow_short_selling:
+        log.warning("pairs trading needs short selling; pass --short or set rules.allow_short_selling")
     bt = Backtester(
         build_strategy(cfg.strategy, only=args.strategy), provider, tickers, cfg.rules,
         initial_cash=cfg.starting_equity, min_confidence=cfg.strategy.min_confidence_to_trade,
         benchmark=cfg.strategy.benchmark, rebalance_every=args.rebalance,
-        lookback_days=cfg.strategy.lookback_days,
+        lookback_days=cfg.strategy.lookback_days, portfolio_cfg=cfg.portfolio, pairs_cfg=cfg.pairs,
     )
     result = bt.run(start, end)
-    print(f"\nBacktest: {args.strategy or 'ensemble'} on {len(tickers)} tickers\n")
+    pairs = f", pairs {', '.join('/'.join(p) for p in cfg.pairs.pairs)}" if cfg.pairs.enabled else ""
+    print(f"\nBacktest: {args.strategy or 'ensemble'} on {len(tickers)} tickers, "
+          f"sizing {cfg.portfolio.method}{pairs}\n")
     print(result.summary())
     out = args.out or str(cfg.data_path / "backtest")
     result.save(out)
     print(f"\nEquity curve and trades saved to {out}/")
+    return 0
+
+
+def _parse_pairs(text: str) -> list[list[str]]:
+    """'KO/PEP,XOM:CVX' -> [['KO', 'PEP'], ['XOM', 'CVX']]"""
+    pairs = []
+    for chunk in text.split(","):
+        legs = [t.strip().upper() for t in chunk.replace(":", "/").split("/") if t.strip()]
+        if len(legs) != 2:
+            raise ValueError(f"bad pair {chunk!r}; use A/B")
+        pairs.append(legs)
+    return pairs
+
+
+def _apply_overrides(cfg: AppConfig, args: argparse.Namespace) -> None:
+    if getattr(args, "method", None):
+        cfg.portfolio.method = args.method
+    if getattr(args, "pairs", None):
+        cfg.pairs.pairs = _parse_pairs(args.pairs)
+        cfg.pairs.enabled = True
+    if getattr(args, "short", False):
+        cfg.rules.allow_short_selling = True
+
+
+def cmd_pairs(cfg: AppConfig, args: argparse.Namespace) -> int:
+    """Show hedge ratio, z-score, correlation and half-life for each pair."""
+    from .models import Portfolio
+    from .pipeline import Pipeline
+    from .strategies import PairsTrader
+
+    _apply_overrides(cfg, args)
+    if not cfg.pairs.pairs:
+        print("No pairs configured. Use --pairs KO/PEP,XOM/CVX or pairs.pairs in config.yaml")
+        return 2
+    pipeline = Pipeline(cfg)
+    trader = PairsTrader(cfg.pairs, cfg.rules)
+    ctx = pipeline.make_context()
+    portfolio = pipeline.paper_portfolio(args.portfolio_file) if args.portfolio_file else Portfolio(0, 0)
+    print(f"{'PAIR':<12}{'Z':>7}{'BETA':>7}{'CORR':>7}{'HALF-LIFE':>11}  {'STATE':<8}REASON")
+    for a, b in trader.pairs:
+        st = trader.evaluate(a, b, ctx, portfolio)
+        z = st.stats
+        nums = (f"{z.zscore:>+7.2f}{z.hedge_ratio:>7.2f}{z.correlation:>7.2f}{z.half_life:>10.1f}d"
+                if z else f"{'n/a':>7}{'':>7}{'':>7}{'':>11}")
+        print(f"{a + '/' + b:<12}{nums}  {st.current:+d}->{st.target:+d}  {st.reason}")
     return 0
 
 
@@ -202,7 +255,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("trade", help="one manual order, e.g. `trade KO buy 10`")
     s.add_argument("ticker")
-    s.add_argument("action", choices=["buy", "sell", "BUY", "SELL"])
+    s.add_argument("action", type=str.upper, choices=["BUY", "SELL", "SHORT", "COVER"])
     s.add_argument("shares", type=int)
     s.add_argument("--price", type=float, help="override the price used for validation")
     s.add_argument("--live", action="store_true")
@@ -218,8 +271,17 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--tickers", help="comma-separated (default: config universe)")
     s.add_argument("--data-dir", help="folder of <TICKER>.csv files instead of Yahoo Finance")
     s.add_argument("--rebalance", type=int, default=1, help="rebalance every N trading days")
+    s.add_argument("--method", choices=["signal", *METHODS],
+                   help="position sizing: signal (default) or a target-weight method")
+    s.add_argument("--pairs", help="pairs to trade, e.g. KO/PEP,XOM/CVX (enables pairs trading)")
+    s.add_argument("--short", action="store_true", help="allow short selling for this backtest")
     s.add_argument("--out", help="output folder (default: data/backtest)")
     s.set_defaults(func=cmd_backtest)
+
+    s = sub.add_parser("pairs", help="show z-score / hedge ratio / half-life for configured pairs")
+    s.add_argument("--pairs", help="override pairs, e.g. KO/PEP,XOM/CVX")
+    s.add_argument("--portfolio-file", help="paper portfolio JSON, to show open pair positions")
+    s.set_defaults(func=cmd_pairs)
 
     s = sub.add_parser("leaderboard", help="check NC rankings now and alert on changes")
     s.set_defaults(func=cmd_leaderboard)

@@ -69,3 +69,34 @@ def test_backtest_without_data_errors(rules):
     with pytest.raises(ValueError):
         Backtester(build_strategy(StrategyConfig(), only="momentum"), InMemoryProvider({}), ["X"], rules).run(
             START, END)
+
+
+def test_pairs_backtest_trades_linked_legs(rules):
+    from smg_trader.config import PairsConfig
+
+    from .test_pairs import make_pair
+
+    a, b = make_pair(n=320, seed=7, half_life=4.0, noise=0.006)
+    provider = InMemoryProvider({"AAA": a, "BBB": b})
+    rules.allow_short_selling = True
+    pairs = PairsConfig(enabled=True, pairs=[["AAA", "BBB"]], capital_pct=0.5, min_correlation=0.5)
+    result = Backtester(build_strategy(StrategyConfig(), only="momentum"), provider, [], rules,
+                        pairs_cfg=pairs).run(START, END)
+    t = result.trades
+    assert {"SHORT", "COVER"} <= set(t.action)
+    assert (t.group == "pair:AAA/BBB").all()
+    assert (t.groupby(["signal_date", "group"]).size() == 2).all()  # legs always together
+    assert result.metrics["closed_trades"] > 0 and result.metrics["pair_trades"] == len(t)
+    assert "covers" in result.summary()
+
+
+@pytest.mark.parametrize("method", ["equal", "inverse_vol", "risk_parity", "mean_variance"])
+def test_target_weight_backtest(universe_provider, rules, method):
+    from smg_trader.config import PortfolioConfig
+
+    cfg = PortfolioConfig(method=method, max_positions=4, long_exposure=0.8)
+    result = Backtester(build_strategy(StrategyConfig(), only="momentum"), universe_provider, ALL, rules,
+                        portfolio_cfg=cfg, rebalance_every=5).run(START, END)
+    buys = result.trades[result.trades.action == "BUY"]
+    assert len(buys) > 0 and set(buys.ticker) <= set(UP)
+    assert result.metrics["total_return"] > 0

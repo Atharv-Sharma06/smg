@@ -8,6 +8,7 @@ from .base import (
 from .ensemble import EnsembleStrategy, build_strategy
 from .fundamentals import FundamentalsStrategy
 from .momentum import MomentumStrategy, Vote
+from .pairs import PairsTrader, PairState, spread_stats
 from .technical import TechnicalStrategy
 
 __all__ = [
@@ -15,6 +16,8 @@ __all__ = [
     "EnsembleStrategy",
     "FundamentalsStrategy",
     "MomentumStrategy",
+    "PairState",
+    "PairsTrader",
     "Strategy",
     "StrategyContext",
     "TechnicalStrategy",
@@ -22,4 +25,5 @@ __all__ = [
     "build_strategy",
     "create_strategy",
     "register_strategy",
+    "spread_stats",
 ]

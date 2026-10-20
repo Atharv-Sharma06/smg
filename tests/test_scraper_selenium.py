@@ -153,7 +153,7 @@ def test_executor_live_against_mock(smg, server, rules, tmp_path):
     assert [r["status"] for r in rows] == ["CONFIRMED", "REJECTED", "CONFIRMED"]
 
 
-def test_full_pipeline_live_against_mock(smg, server, app_config):
+def test_full_pipeline_live_against_mock(smg, server, app_config, monkeypatch):
     """Scraper -> strategy -> executor -> confirmation -> leaderboard, in LIVE mode on the mock site."""
     from smg_trader.alerts import AlertManager
     from smg_trader.market_data import Fundamentals, InMemoryProvider
@@ -176,6 +176,7 @@ def test_full_pipeline_live_against_mock(smg, server, app_config):
     app_config.strategy.weights = {"momentum": 1.0}
     app_config.smg = smg.cfg
     alerts = AlertManager([])
+    monkeypatch.setattr(smg, "close", lambda: None)  # the browser is shared with later tests
     pipe = Pipeline(app_config, provider=provider, alerts=alerts, clock=lambda: MARKET_OPEN_TIME,
                     scraper_factory=lambda: smg)
     summary = pipe.run_once(RunOptions(live=True, check_leaderboard=True))
@@ -186,3 +187,46 @@ def test_full_pipeline_live_against_mock(smg, server, app_config):
     assert "KO" not in server.state.holdings and server.state.holdings["XOM"]["shares"] > 0
     assert summary["leaderboard"]["our_rank"] == 1
     assert {a.kind for a in alerts.sent} >= {"trade"}
+
+
+def test_short_sell_and_cover_on_mock(smg, server):
+    smg.place_order(TradeOrder("XOM", Action.SHORT, 20, 110.0))
+    assert server.state.orders[-1]["action"] == "Short Sell"
+    p = smg.get_portfolio()
+    short = p.holding("XOM", "SHORT")
+    assert short is not None and short.shares == 20 and short.market_value == 2_200.0
+    assert p.shares_of("XOM") == 0 and p.short_value == 2_200.0
+    assert p.total_equity == server.state.equity
+    smg.place_order(TradeOrder("XOM", Action.COVER, 20, 110.0))
+    assert server.state.orders[-1]["action"] == "Short Cover"
+    assert smg.get_portfolio().holding("XOM", "SHORT") is None
+
+
+def test_live_pair_trade_against_mock(smg, server, tmp_path):
+    """Both legs of a pair go out together and are confirmed from the re-scraped portfolio."""
+    from smg_trader.alerts import AlertManager
+    from smg_trader.config import RulesConfig
+    from smg_trader.executor import TradeExecutor, TradeLog
+    from smg_trader.rules import RuleValidator
+
+    from .conftest import MARKET_OPEN_TIME
+
+    rules = RulesConfig(allow_short_selling=True, min_seconds_between_trades=0, max_position_pct=0.5)
+    ex = TradeExecutor(RuleValidator(rules, lambda t: "NYSE", clock=lambda: MARKET_OPEN_TIME),
+                       TradeLog(tmp_path / "trades.csv"), AlertManager([]), broker=smg, dry_run=False,
+                       confirm_delay=0)
+    legs = [TradeOrder("XOM", Action.SHORT, 50, 110.0, group_id="pair:XOM/PEP"),
+            TradeOrder("PEP", Action.BUY, 30, 150.0, group_id="pair:XOM/PEP")]
+    results, after = ex.execute(legs, smg.get_portfolio())
+    assert [r.status for r in results] == [TradeStatus.CONFIRMED, TradeStatus.CONFIRMED]
+    assert after.net_shares("XOM") == -50 and after.net_shares("PEP") == 30
+    assert server.state.shorts["XOM"]["shares"] == 50 and server.state.holdings["PEP"]["shares"] == 30
+
+    # A pair whose second leg SMG rejects is unwound.
+    legs = [TradeOrder("KO", Action.SELL, 50, 60.0, group_id="pair:KO/ZZZZ"),
+            TradeOrder("ZZZZ", Action.BUY, 10, 10.0, group_id="pair:KO/ZZZZ")]
+    results, after = ex.execute(legs, after)
+    assert [(r.order.ticker, r.order.action, r.status) for r in results] == [
+        ("KO", Action.SELL, TradeStatus.CONFIRMED), ("ZZZZ", Action.BUY, TradeStatus.FAILED),
+        ("KO", Action.BUY, TradeStatus.CONFIRMED)]
+    assert server.state.holdings["KO"]["shares"] == 50

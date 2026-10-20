@@ -1,8 +1,9 @@
 """Strategy 2: fundamentals (P/E, EPS growth, dividend yield).
 
-Point-in-time fundamentals are not available for past dates, so this strategy
-abstains in backtests (``ctx.live is False``) rather than leak today's numbers
-into history.
+In backtests the numbers come from the provider's point-in-time data (e.g.
+P/E rebuilt from reported EPS, or snapshots the bot recorded on earlier live
+runs). When nothing is known for a date the strategy abstains rather than use
+today's numbers in the past.
 """
 
 from __future__ import annotations
@@ -56,9 +57,7 @@ class FundamentalsStrategy(Strategy):
         self.expensive_pe = expensive_pe
 
     def score(self, ticker: str, ctx: StrategyContext) -> ScoreResult:
-        if not ctx.live:
-            return None
-        f = ctx.provider.fundamentals(ticker)
+        f = ctx.fundamentals(ticker)
         if f is None:
             return None
         parts = {

@@ -95,3 +95,30 @@ def test_example_config_loads():
         from smg_trader.config import AppConfig, _merge_into
 
         _merge_into(AppConfig(), {"rulez": {}})
+
+
+def test_offline_run_with_pairs_and_risk_parity(app_config, universe_provider):
+    from .test_pairs import make_pair
+
+    a, b = make_pair(n=250, shock=0.025)  # z ~ 2.1: inside the entry band
+    universe_provider.prices.update({"AAA": a, "BBB": b})
+    universe_provider._fundamentals["AAA"] = universe_provider._fundamentals["BBB"] = (
+        universe_provider._fundamentals["FLA"])
+    app_config.rules.allow_short_selling = True
+    app_config.rules.max_trades_per_run = 10
+    app_config.portfolio.method = "risk_parity"
+    app_config.portfolio.max_positions = 3
+    app_config.pairs.enabled = True
+    app_config.pairs.pairs = [["AAA", "BBB"]]
+    pipe = make_pipeline(app_config, universe_provider)
+    summary = pipe.run_once(RunOptions(offline=True))
+
+    by_group = [o for o in summary["orders"] if o["group"] == "pair:AAA/BBB"]
+    assert [(o["ticker"], o["action"], o["status"]) for o in by_group] == [
+        ("AAA", "SHORT", "DRY_RUN"), ("BBB", "BUY", "DRY_RUN")]
+    directional = [o for o in summary["orders"] if not o["group"]]
+    assert directional and all(o["ticker"] in {"UPA", "UPB", "UPC", "UPD", "UPE", "UPF"} for o in directional)
+    assert sum(1 for w in summary["target_weights"].values() if w > 0) == 3
+    assert {s["ticker"] for s in summary["pair_signals"]} == {"AAA", "BBB"}
+    # Today's fundamentals were saved for future point-in-time backtests.
+    assert (app_config.data_path / "pit" / "fundamentals" / "UPA.jsonl").exists()

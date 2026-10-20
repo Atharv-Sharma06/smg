@@ -5,8 +5,8 @@ Each *source* looks at one kind of evidence and votes +1 (bullish), -1
 at least ``min_signals`` sources vote bullish and bulls outnumber bears, and
 sells on the mirror condition.
 
-Sources that need current-only data (analyst actions, news) abstain in
-backtests so the replay has no look-ahead.
+Analyst and news sources read through the strategy context, so backtests
+see only what was known on each date (and abstain when nothing is).
 
 Add a source by writing a function ``(ticker, ctx) -> Vote | None`` and
 passing it in ``sources=`` (or appending to ``DEFAULT_SOURCES``).
@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from datetime import timedelta
 from typing import Any, Callable
 
 from ..market_data import SECTOR_ETFS
@@ -59,8 +58,7 @@ def relative_strength(ticker: str, ctx: StrategyContext, margin: float = 0.02) -
 
 
 def sector_trend(ticker: str, ctx: StrategyContext) -> Vote | None:
-    f = ctx.provider.fundamentals(ticker)
-    etf = SECTOR_ETFS.get(f.sector or "") if f else None
+    etf = SECTOR_ETFS.get(ctx.sector(ticker) or "")
     if not etf:
         return None
     r = pct_return(ctx.closes(etf), 20)
@@ -97,9 +95,7 @@ def near_52w_high(ticker: str, ctx: StrategyContext) -> Vote | None:
 
 
 def analyst_actions(ticker: str, ctx: StrategyContext) -> Vote | None:
-    if not ctx.live:
-        return None
-    acts = ctx.provider.analyst_actions(ticker, ctx.as_of - timedelta(days=30))
+    acts = ctx.analyst_actions(ticker, days=30)
     if acts is None:
         return None
     net = acts.upgrades - acts.downgrades
@@ -124,9 +120,7 @@ def headline_sentiment(headlines: list[str]) -> int:
 
 
 def news_sentiment(ticker: str, ctx: StrategyContext) -> Vote | None:
-    if not ctx.live:
-        return None
-    headlines = ctx.provider.news_headlines(ticker)
+    headlines = ctx.news(ticker, days=7)
     if not headlines:
         return None
     net = headline_sentiment(headlines)

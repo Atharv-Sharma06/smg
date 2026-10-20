@@ -9,9 +9,20 @@ from typing import Any
 
 
 class Action(str, Enum):
-    BUY = "BUY"
-    SELL = "SELL"
+    BUY = "BUY"      # open / add to a long position (strategy signal: bullish)
+    SELL = "SELL"    # reduce / close a long position (strategy signal: bearish)
     HOLD = "HOLD"
+    SHORT = "SHORT"  # SMG "Short Sell": open / add to a short position
+    COVER = "COVER"  # SMG "Short Cover": buy back a short position
+
+    @property
+    def position(self) -> str:
+        """Which side of the book this order acts on."""
+        return "SHORT" if self in (Action.SHORT, Action.COVER) else "LONG"
+
+    @property
+    def opens(self) -> bool:
+        return self in (Action.BUY, Action.SHORT)
 
 
 class TradeStatus(str, Enum):
@@ -62,17 +73,35 @@ class Portfolio:
     buying_power: float | None = None
     timestamp: datetime = field(default_factory=_now)
 
-    def holding(self, ticker: str) -> Holding | None:
+    def holding(self, ticker: str, position: str = "LONG") -> Holding | None:
         ticker = ticker.upper()
-        return next((h for h in self.holdings if h.ticker == ticker), None)
+        return next((h for h in self.holdings if h.ticker == ticker and h.position == position), None)
 
-    def shares_of(self, ticker: str) -> int:
-        h = self.holding(ticker)
+    def shares_of(self, ticker: str, position: str = "LONG") -> int:
+        h = self.holding(ticker, position)
         return h.shares if h else 0
+
+    def net_shares(self, ticker: str) -> int:
+        """Long shares minus short shares (negative = net short)."""
+        return self.shares_of(ticker, "LONG") - self.shares_of(ticker, "SHORT")
+
+    @property
+    def long_value(self) -> float:
+        return sum(h.market_value for h in self.holdings if h.position != "SHORT")
+
+    @property
+    def short_value(self) -> float:
+        """Market value of short positions (positive number = what it costs to cover)."""
+        return sum(h.market_value for h in self.holdings if h.position == "SHORT")
 
     @property
     def invested_value(self) -> float:
-        return sum(h.market_value for h in self.holdings)
+        """Net market value: longs minus shorts. Equity = cash + invested_value."""
+        return self.long_value - self.short_value
+
+    @property
+    def gross_exposure(self) -> float:
+        return self.long_value + self.short_value
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -142,6 +171,9 @@ class TradeOrder:
     confidence: float = 0.0
     reason: str = ""
     exchange: str | None = None
+    # Orders sharing a group id (e.g. the two legs of a pair trade) are
+    # validated together and executed all-or-nothing.
+    group_id: str = ""
 
     @property
     def notional(self) -> float:

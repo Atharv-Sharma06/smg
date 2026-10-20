@@ -111,6 +111,8 @@ DEFAULT_OPTION_TEXT: dict[str, list[str]] = {
     "security_type": ["Stock", "Equit"],
     "BUY": ["Buy"],
     "SELL": ["Sell"],
+    "SHORT": ["Short Sell", "Sell Short", "Short"],
+    "COVER": ["Short Cover", "Buy to Cover", "Cover"],
     "order_type": ["Market"],
 }
 

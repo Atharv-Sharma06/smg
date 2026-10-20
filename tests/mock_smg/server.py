@@ -15,7 +15,7 @@ from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-PRICES = {"AAPL": 190.00, "KO": 60.00, "MSFT": 410.00, "PENNY": 2.50, "XOM": 110.00}
+PRICES = {"AAPL": 190.00, "KO": 60.00, "MSFT": 410.00, "PENNY": 2.50, "XOM": 110.00, "PEP": 150.00}
 
 
 class MockSMGState:
@@ -28,6 +28,7 @@ class MockSMGState:
             "AAPL": {"shares": 100, "purchase": 170.00},
             "KO": {"shares": 50, "purchase": 58.00},
         }
+        self.shorts: dict[str, dict] = {}  # ticker -> {"shares", "purchase"} (purchase = short-sale price)
         self.pending: list[dict] = []
         self.orders: list[dict] = []
         self.hold_orders_pending = False  # when True, trades go to pending instead of filling
@@ -42,7 +43,9 @@ class MockSMGState:
 
     @property
     def equity(self) -> float:
-        return self.cash + sum(PRICES[t] * h["shares"] for t, h in self.holdings.items())
+        longs = sum(PRICES[t] * h["shares"] for t, h in self.holdings.items())
+        shorts = sum(PRICES[t] * h["shares"] for t, h in self.shorts.items())
+        return self.cash + longs - shorts
 
 
 def _page(title: str, body: str, logged_in: bool = True) -> str:
@@ -160,7 +163,15 @@ def make_handler(state: MockSMGState):
                 rows += (f"<tr><td>{t}</td><td>{t} Corp</td><td>Long</td><td>{h['shares']:,}</td>"
                          f"<td>${h['purchase']:,.2f}</td><td>${px:,.2f}</td><td>${value:,.2f}</td>"
                          f"<td>{gl_txt}</td></tr>")
-            if not state.holdings:
+            for t, h in state.shorts.items():
+                px = PRICES[t]
+                value = px * h["shares"]
+                gl = (h["purchase"] - px) * h["shares"]
+                gl_txt = f"${gl:,.2f}" if gl >= 0 else f"(${-gl:,.2f})"
+                rows += (f"<tr><td>{t}</td><td>{t} Corp</td><td>Short</td><td>{h['shares']:,}</td>"
+                         f"<td>${h['purchase']:,.2f}</td><td>${px:,.2f}</td><td>(${value:,.2f})</td>"
+                         f"<td>{gl_txt}</td></tr>")
+            if not state.holdings and not state.shorts:
                 table = "<p>You have no holdings.</p>"
             else:
                 table = f"""
@@ -228,7 +239,7 @@ def make_handler(state: MockSMGState):
                 return self._trade_form("Please choose a security type of Stocks.")
             if symbol not in PRICES:
                 return self._trade_form(f"Symbol {symbol} was not found.")
-            if action not in ("Buy", "Sell"):
+            if action not in ("Buy", "Sell", "Short Sell", "Short Cover"):
                 return self._trade_form("Choose a transaction type.")
             if not shares.isdigit():
                 return self._trade_form("Shares must be a whole number.")
@@ -248,6 +259,11 @@ def make_handler(state: MockSMGState):
             held = state.holdings.get(symbol, {}).get("shares", 0)
             if action == "Sell" and shares > held:
                 return self._trade_form("You cannot sell more shares than you own.")
+            short_held = state.shorts.get(symbol, {}).get("shares", 0)
+            if action == "Short Cover" and shares > short_held:
+                return self._trade_form("You cannot cover more shares than you are short.")
+            if action == "Short Sell" and held:
+                return self._trade_form("You must sell your long position before selling short.")
             conf = secrets.token_hex(4).upper()
             state.orders.append({"ticker": symbol, "action": action, "shares": shares, "confirmation": conf})
             if state.hold_orders_pending:
@@ -256,6 +272,15 @@ def make_handler(state: MockSMGState):
                 state.cash -= shares * price
                 h = state.holdings.setdefault(symbol, {"shares": 0, "purchase": price})
                 h["shares"] += shares
+            elif action == "Short Sell":
+                state.cash += shares * price
+                h = state.shorts.setdefault(symbol, {"shares": 0, "purchase": price})
+                h["shares"] += shares
+            elif action == "Short Cover":
+                state.cash -= shares * price
+                state.shorts[symbol]["shares"] -= shares
+                if state.shorts[symbol]["shares"] == 0:
+                    del state.shorts[symbol]
             else:
                 state.cash += shares * price
                 state.holdings[symbol]["shares"] -= shares

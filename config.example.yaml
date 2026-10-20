@@ -7,6 +7,7 @@ leaderboard_day: fri
 leaderboard_time: "16:30"
 market_data: yfinance          # or "csv" with market_data_dir of <TICKER>.csv files
 market_data_dir: data/prices
+record_point_in_time: true     # save fundamentals/news each live run to data/pit/ for later backtests
 
 smg:
   login_url: https://www.stockmarketgame.org/login.html
@@ -39,8 +40,11 @@ rules:
   margin_limit: 50000
   margin_weekly_interest_rate: 0.07
   enforce_market_hours: true
-  allow_short_selling: false
+  allow_short_selling: false     # needed for SHORT/COVER orders, short books and pairs
+  min_short_price: 5.00         # check your SMG session's short-sale rules
+  short_margin_requirement: 0.50  # collateral held against shorts (fraction of short value)
   max_position_pct: 0.20        # bot risk limit per ticker
+  max_gross_exposure: 1.5       # (longs + shorts) / equity
   max_trades_per_run: 5
   min_seconds_between_trades: 5
   cash_reserve: 1000
@@ -59,6 +63,30 @@ strategy:
   params:
     technical: {rsi_oversold: 30, rsi_overbought: 70, ma_window: 50}
     fundamentals: {fair_pe: 25, expensive_pe: 40}
+
+portfolio:
+  # signal: size each signal on its own (default). Or rebalance to target weights with
+  # equal | confidence | inverse_vol | risk_parity | mean_variance
+  method: signal
+  max_positions: 10
+  max_short_positions: 5
+  long_exposure: 0.90           # long book, fraction of equity
+  short_exposure: 0.0           # short book; > 0 needs rules.allow_short_selling
+  rebalance_threshold: 0.02     # ignore weight drifts smaller than 2% of equity
+  min_trade_value: 500
+  cov_lookback_days: 60
+  cov_shrinkage: 0.3
+
+pairs:
+  enabled: false                # needs rules.allow_short_selling: true
+  pairs: []                     # e.g. [[KO, PEP], [XOM, CVX], [V, MA]]
+  capital_pct: 0.20             # gross capital for all pairs, held back from the directional book
+  lookback_days: 60
+  entry_z: 2.0
+  exit_z: 0.5
+  stop_z: 4.0
+  min_correlation: 0.7          # daily-return correlation
+  max_half_life: 30             # days
 
 alerts:
   high_confidence_threshold: 0.8

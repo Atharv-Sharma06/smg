@@ -65,7 +65,10 @@ class RulesConfig:
     margin_weekly_interest_rate: float = 0.07
     enforce_market_hours: bool = True
     allow_short_selling: bool = False
+    min_short_price: float = 5.00           # check your SMG session's short-sale minimum
+    short_margin_requirement: float = 0.50  # collateral held against shorts, fraction of short value
     max_position_pct: float = 0.20          # bot risk limit, not an SMG rule
+    max_gross_exposure: float = 1.5         # (longs + shorts) / equity
     max_trades_per_run: int = 5
     min_seconds_between_trades: float = 5.0
     cash_reserve: float = 1_000.0           # never spend the last $X
@@ -89,6 +92,47 @@ class StrategyConfig:
 
 
 @dataclass
+class PortfolioConfig:
+    """How signals become positions.
+
+    ``method: signal`` sizes each signal on its own (buy = confidence x
+    max_position_pct, sell = close). Any other method builds a target
+    portfolio and rebalances to it, trimming positions that grew too big:
+
+    * ``equal``         equal weights
+    * ``confidence``    weights proportional to signal confidence
+    * ``inverse_vol``   weights proportional to 1 / volatility
+    * ``risk_parity``   equal risk contribution (uses the covariance matrix)
+    * ``mean_variance`` max risk-adjusted return, expected return from signal score
+    """
+
+    method: str = "signal"
+    max_positions: int = 10           # long book size
+    max_short_positions: int = 5
+    long_exposure: float = 0.90       # long book as a fraction of equity
+    short_exposure: float = 0.0       # short book; > 0 needs rules.allow_short_selling
+    rebalance_threshold: float = 0.02  # skip trades that move a weight by less than this
+    min_trade_value: float = 500.0
+    cov_lookback_days: int = 60       # trading days of returns for volatility / covariance
+    cov_shrinkage: float = 0.3        # blend sample covariance toward its diagonal
+
+
+@dataclass
+class PairsConfig:
+    """Statistical-arbitrage pairs: short the rich leg, buy the cheap leg."""
+
+    enabled: bool = False
+    pairs: list[list[str]] = field(default_factory=list)  # e.g. [[KO, PEP], [XOM, CVX]]
+    capital_pct: float = 0.20     # gross capital (both legs, all pairs) as a fraction of equity
+    lookback_days: int = 60       # trading days for hedge ratio and z-score
+    entry_z: float = 2.0
+    exit_z: float = 0.5
+    stop_z: float = 4.0           # close if the spread keeps widening; never enter beyond this
+    min_correlation: float = 0.7
+    max_half_life: float = 30.0   # days; spread must mean-revert faster than this
+
+
+@dataclass
 class AlertConfig:
     slack_webhook_url: str = ""
     email_to: str = ""
@@ -108,6 +152,8 @@ class AppConfig:
     rules: RulesConfig = field(default_factory=RulesConfig)
     strategy: StrategyConfig = field(default_factory=StrategyConfig)
     alerts: AlertConfig = field(default_factory=AlertConfig)
+    portfolio: PortfolioConfig = field(default_factory=PortfolioConfig)
+    pairs: PairsConfig = field(default_factory=PairsConfig)
     data_dir: str = "data"
     starting_equity: float = 100_000.0
     live_trading_enabled: bool = False   # second key for live mode, besides --live
@@ -116,6 +162,8 @@ class AppConfig:
     leaderboard_time: str = "16:30"
     market_data: str = "yfinance"        # "yfinance" or "csv"
     market_data_dir: str = "data/prices"  # used when market_data == "csv"
+    # Save fundamentals/news each live run to data/pit/ so they can be backtested later.
+    record_point_in_time: bool = True
 
     @property
     def data_path(self) -> Path:
